@@ -1,0 +1,8 @@
+[
+    {
+        "name": "Leader",
+        "uid": "18366778984",
+        "interval_mins": 40,
+        "auto_activate": true
+    }
+]
