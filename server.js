@@ -1,5 +1,6 @@
 import express from 'express';
 import http from 'http';
+import https from 'https';
 import { Server } from 'socket.io';
 import puppeteerCore from 'puppeteer-core';
 import { addExtra } from 'puppeteer-extra';
@@ -35,16 +36,12 @@ const UID_FILE = path.join(__dirname, 'uid.json');
 const activeTimers = {};
 const systemLogs = [];
 const engineStatus = {};
-global.watchingUID = null;
 const executionQueue = [];
 let currentRunningUid = null;
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
-
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
@@ -53,6 +50,46 @@ app.use((req, res, next) => {
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     next();
 });
+
+// ==========================================
+// 🚀 FAST GAME PROXY FORWARDER (Intercepts /)
+// ==========================================
+app.use((req, res, next) => {
+    // Ignore dashboard and API internal paths
+    const internalPaths = ['/activate', '/api/', '/socket.io/'];
+    if (internalPaths.some(p => req.path.startsWith(p))) {
+        return next();
+    }
+
+    // Forward everything else to astutech.online efficiently
+    const options = {
+        hostname: 'version.astutech.online',
+        port: 443,
+        path: req.url,
+        method: req.method,
+        headers: {
+            ...req.headers,
+            host: 'version.astutech.online' // Update host header for target
+        }
+    };
+
+    const proxyReq = https.request(options, (proxyRes) => {
+        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+        proxyRes.pipe(res, { end: true });
+    });
+
+    proxyReq.on('error', (err) => {
+        console.error(`[PROXY ERROR] Game request failed: ${err.message}`);
+        res.status(502).end();
+    });
+
+    // Pipe the raw incoming request directly to the proxy
+    req.pipe(proxyReq, { end: true });
+});
+
+// JSON body parsers (Only applies to internal paths because proxy catches others first)
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // ==========================================
 // DATA ENGINE (UID.JSON)
@@ -133,7 +170,7 @@ function startUIDCycle(uid, name, intervalMins, autoActivate) {
 }
 
 // ==========================================
-// HIGH-FPS STREAMING CHROMIUM ENGINE WITH BYPASSES
+// BACKGROUND AUTOMATION ENGINE
 // ==========================================
 async function runGhostActivator(uid, name) {
     if (engineStatus[uid]) return;
@@ -150,14 +187,6 @@ async function runGhostActivator(uid, name) {
         
         const page = (await browser.pages())[0] || await browser.newPage(); 
         await page.setViewport({ width: 360, height: 640, isMobile: true, hasTouch: true }); 
-        
-        const cdp = await page.target().createCDPSession(); 
-        await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 65, maxWidth: 360, maxHeight: 640, everyNthFrame: 1 }); 
-        
-        cdp.on('Page.screencastFrame', async (evt) => { 
-            if (global.watchingUID === uid) { io.emit('live_frame', { uid, frame: evt.data }); } 
-            await cdp.send('Page.screencastFrameAck', { sessionId: evt.sessionId }).catch(() => {}); 
-        }); 
         
         await page.evaluateOnNewDocument(() => { window.open = function() { return null; }; }); 
         
@@ -341,7 +370,6 @@ const uiTemplate = `
     <title>Romeo Engine</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="/socket.io/socket.io.js"></script>
-    <!-- Google Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script>
         tailwind.config = {
@@ -364,7 +392,6 @@ const uiTemplate = `
     <style>
         body { font-family: 'Inter', sans-serif; -webkit-tap-highlight-color: transparent; }
         
-        /* Glassmorphism Classes */
         .glass {
             background: rgba(255, 255, 255, 0.6);
             backdrop-filter: blur(16px);
@@ -376,46 +403,22 @@ const uiTemplate = `
             border: 1px solid rgba(255, 255, 255, 0.08);
         }
 
-        /* Swipe Card Logic */
-        .swipe-container {
-            position: relative;
-            overflow: hidden;
-            border-radius: 1.5rem;
-            margin-bottom: 1rem;
-            background: #ef4444; /* Red background behind card */
-        }
-        .swipe-card {
-            position: relative;
-            z-index: 10;
-            transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-            touch-action: pan-y;
-        }
-        .swiping { transition: none; }
-        .delete-action-bg {
-            position: absolute; right: 0; top: 0; bottom: 0; width: 100%;
-            display: flex; justify-content: flex-end; align-items: center;
-            padding-right: 1.5rem; color: white; font-weight: 600; font-size: 1.1rem;
-        }
-
-        /* Custom Scrollbar */
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: rgba(156, 163, 175, 0.3); border-radius: 10px; }
         .dark ::-webkit-scrollbar-thumb { background: rgba(75, 85, 99, 0.5); }
         
-        /* Toggle Switch */
         .toggle-checkbox:checked { right: 0; border-color: #3b82f6; }
         .toggle-checkbox:checked + .toggle-label { background-color: #3b82f6; }
+        .toggle-checkbox:checked + .toggle-label .dot { transform: translateX(20px); }
     </style>
 </head>
 <body class="bg-slate-50 dark:bg-gray-950 text-slate-800 dark:text-gray-100 min-h-screen transition-colors duration-500 overflow-x-hidden relative">
     
-    <!-- Background Orbs & Effects -->
     <div class="fixed top-[-10%] left-[-10%] w-[40vw] h-[40vw] bg-indigo-400/20 dark:bg-indigo-600/20 rounded-full blur-[100px] pointer-events-none z-0"></div>
     <div class="fixed bottom-[-10%] right-[-10%] w-[50vw] h-[50vw] bg-fuchsia-400/20 dark:bg-fuchsia-600/20 rounded-full blur-[120px] pointer-events-none z-0"></div>
 
     <div class="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <!-- Header -->
         <header class="flex justify-between items-center mb-10 animate-fade-in">
             <div class="flex items-center gap-3">
                 <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/30 text-white font-bold text-xl">
@@ -434,10 +437,7 @@ const uiTemplate = `
         </header>
 
         <div class="grid grid-cols-1 lg:grid-cols-12 gap-8">
-            
-            <!-- Left Column: Controls & Logs -->
             <div class="lg:col-span-5 space-y-6 animate-slide-up" style="animation-delay: 0.1s;">
-                <!-- Add Node Card -->
                 <div class="glass rounded-3xl p-6 shadow-xl shadow-gray-200/50 dark:shadow-none">
                     <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
                         <svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path></svg>
@@ -462,42 +462,24 @@ const uiTemplate = `
                     </form>
                 </div>
 
-                <!-- Stream & Logs Box -->
                 <div class="glass rounded-3xl p-4 shadow-xl shadow-gray-200/50 dark:shadow-none flex flex-col h-[400px]">
                     <div class="flex justify-between items-center mb-3 px-2">
                         <h2 class="text-sm font-semibold flex items-center gap-2">
                             <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> Engine Output
                         </h2>
-                        <!-- Tabs -->
-                        <div class="flex gap-2 text-xs font-medium bg-gray-100 dark:bg-gray-800 p-1 rounded-lg">
-                            <button onclick="switchTab('logs')" id="tab-logs" class="px-3 py-1.5 rounded-md bg-white dark:bg-gray-700 shadow-sm transition-all text-indigo-600 dark:text-indigo-400">Logs</button>
-                            <button onclick="switchTab('stream')" id="tab-stream" class="px-3 py-1.5 rounded-md text-gray-500 dark:text-gray-400 transition-all">Stream</button>
-                        </div>
                     </div>
-                    
-                    <!-- Content Area -->
                     <div class="relative flex-1 bg-white/50 dark:bg-black/40 rounded-2xl overflow-hidden border border-gray-100 dark:border-gray-800">
-                        
-                        <!-- Logs View -->
                         <div id="logs-view" class="absolute inset-0 p-4 overflow-y-auto font-mono text-sm leading-relaxed"></div>
-                        
-                        <!-- Stream View -->
-                        <div id="stream-view" class="absolute inset-0 hidden flex flex-col items-center justify-center bg-black">
-                            <div id="stream-status" class="absolute text-white/50 text-xs font-medium tracking-widest z-10">STANDBY</div>
-                            <img id="stream-canvas" class="h-full object-contain relative z-20" style="display:none;" />
-                        </div>
                     </div>
                 </div>
             </div>
 
-            <!-- Right Column: Active Nodes -->
             <div class="lg:col-span-7 animate-slide-up" style="animation-delay: 0.2s;">
                 <div class="flex justify-between items-center mb-6 pl-2">
                     <h2 class="text-xl font-semibold tracking-tight">Active Nodes</h2>
                     <span id="node-count" class="bg-indigo-100 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 px-3 py-1 rounded-full text-xs font-bold">0 Online</span>
                 </div>
                 
-                <!-- Cards Container -->
                 <div id="nodes-container" class="space-y-4">
                     <!-- Cards injected via JS -->
                 </div>
@@ -508,9 +490,7 @@ const uiTemplate = `
     <script>
         const socket = io();
         let uiData = {};
-        let activeTab = 'logs';
 
-        // Theme Setup
         function initTheme() {
             if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
                 document.documentElement.classList.add('dark');
@@ -519,11 +499,13 @@ const uiTemplate = `
             }
             updateThemeIcon();
         }
+        
         function toggleTheme() {
             document.documentElement.classList.toggle('dark');
             localStorage.theme = document.documentElement.classList.contains('dark') ? 'dark' : 'light';
             updateThemeIcon();
         }
+        
         function updateThemeIcon() {
             const isDark = document.documentElement.classList.contains('dark');
             const icon = document.getElementById('theme-icon');
@@ -533,29 +515,6 @@ const uiTemplate = `
         }
         initTheme();
 
-        // UI Tabs
-        function switchTab(tab) {
-            activeTab = tab;
-            document.getElementById('logs-view').style.display = tab === 'logs' ? 'block' : 'none';
-            document.getElementById('stream-view').style.display = tab === 'stream' ? 'flex' : 'none';
-            
-            // Tab styling
-            const onClass = "bg-white dark:bg-gray-700 shadow-sm text-indigo-600 dark:text-indigo-400".split(" ");
-            const offClass = "text-gray-500 dark:text-gray-400".split(" ");
-            
-            const logsBtn = document.getElementById('tab-logs');
-            const streamBtn = document.getElementById('tab-stream');
-            
-            if(tab === 'logs') {
-                logsBtn.classList.add(...onClass); logsBtn.classList.remove(...offClass);
-                streamBtn.classList.remove(...onClass); streamBtn.classList.add(...offClass);
-            } else {
-                streamBtn.classList.add(...onClass); streamBtn.classList.remove(...offClass);
-                logsBtn.classList.remove(...onClass); logsBtn.classList.add(...offClass);
-            }
-        }
-
-        // Form Submit
         document.getElementById('add-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             const btn = e.target.querySelector('button');
@@ -576,15 +535,6 @@ const uiTemplate = `
             btn.innerText = origText;
         });
 
-        async function delUser(uid) {
-            if(!confirm('Permanently remove this node?')) return;
-            await fetch('/api/target/del', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ uid })
-            });
-        }
-
         async function toggleStatus(uid, status) {
             await fetch('/api/target/toggle', {
                 method: 'POST',
@@ -593,7 +543,6 @@ const uiTemplate = `
             });
         }
 
-        // Socket Events
         socket.on('init_logs', (logs) => {
             const lv = document.getElementById('logs-view');
             lv.innerHTML = logs.join('');
@@ -606,84 +555,52 @@ const uiTemplate = `
             lv.scrollTop = lv.scrollHeight;
         });
 
-        socket.on('live_frame', (data) => {
-            const img = document.getElementById('stream-canvas');
-            const status = document.getElementById('stream-status');
-            img.src = 'data:image/jpeg;base64,' + data.frame;
-            img.style.display = 'block';
-            status.style.display = 'none';
-        });
-
-        // Smart UI Rendering
         socket.on('update_ui', (data) => {
             const container = document.getElementById('nodes-container');
             const uids = Object.keys(data);
             
             document.getElementById('node-count').innerText = uids.length + " Online";
 
-            // Remove deleted nodes
             Array.from(container.children).forEach(el => {
                 if(!uids.includes(el.id.replace('card-', ''))) el.remove();
             });
 
-            // Update or Create Nodes
             uids.forEach(uid => {
                 const info = data[uid];
                 let card = document.getElementById('card-' + uid);
                 
                 if(!card) {
-                    // Create New Swipe Card
                     const wrapper = document.createElement('div');
-                    wrapper.className = 'swipe-container';
+                    wrapper.className = 'glass p-5 rounded-2xl flex items-center justify-between mb-3 shadow-sm border border-gray-100 dark:border-white/5';
                     wrapper.id = 'card-' + uid;
                     
                     wrapper.innerHTML = \`
-                        <div class="delete-action-bg">
-                            <svg class="w-6 h-6 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                        <div class="flex items-center gap-4">
+                            <div class="w-12 h-12 rounded-2xl flex items-center justify-center bg-gray-100/50 dark:bg-gray-800/50 shadow-inner">
+                                <svg class="w-6 h-6 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5.121 17.804A13.937 13.937 0 0112 16c2.5 0 4.847.655 6.879 1.804M15 10a3 3 0 11-6 0 3 3 0 016 0zm6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                            </div>
+                            <div>
+                                <h3 class="text-base font-bold text-gray-900 dark:text-white line-clamp-1">\${info.name}</h3>
+                                <p class="text-xs font-mono text-gray-500 dark:text-gray-400 mt-0.5">\${uid}</p>
+                            </div>
                         </div>
-                        <div class="swipe-card glass p-5 flex items-center justify-between" id="inner-\${uid}">
-                            <div class="flex items-center gap-4">
-                                <div class="w-12 h-12 rounded-2xl flex items-center justify-center bg-gray-100/50 dark:bg-gray-800/50 shadow-inner">
-                                    <svg class="w-6 h-6 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5.121 17.804A13.937 13.937 0 0112 16c2.5 0 4.847.655 6.879 1.804M15 10a3 3 0 11-6 0 3 3 0 016 0zm6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                                </div>
-                                <div>
-                                    <h3 class="text-base font-bold text-gray-900 dark:text-white line-clamp-1">\${info.name}</h3>
-                                    <p class="text-xs font-mono text-gray-500 dark:text-gray-400 mt-0.5">\${uid}</p>
-                                </div>
+                        
+                        <div class="flex items-center gap-5">
+                            <div class="text-right hidden sm:block">
+                                <p class="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-0.5">Status</p>
+                                <p id="time-\${uid}" class="text-sm font-bold \${info.isRunning ? 'text-emerald-500 animate-pulse' : 'text-gray-700 dark:text-gray-200'}">\${info.isRunning ? 'Running...' : info.remaining}</p>
                             </div>
                             
-                            <div class="flex items-center gap-5">
-                                <div class="text-right hidden sm:block">
-                                    <p class="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-0.5">Status</p>
-                                    <p id="time-\${uid}" class="text-sm font-bold \${info.isRunning ? 'text-emerald-500 animate-pulse' : 'text-gray-700 dark:text-gray-200'}">\${info.isRunning ? 'Running...' : info.remaining}</p>
-                                </div>
-                                
-                                <button onclick="toggleWatch('\${uid}')" id="watch-\${uid}" class="p-2 rounded-xl bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors text-gray-500" title="Watch Stream">
-                                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
-                                </button>
-                                
-                                <!-- Modern Toggle -->
-                                <label class="flex items-center cursor-pointer relative">
-                                  <input type="checkbox" onchange="toggleStatus('\${uid}', this.checked)" \${info.autoActivate ? 'checked' : ''} class="sr-only toggle-checkbox">
-                                  <div class="toggle-label w-11 h-6 bg-gray-200 dark:bg-gray-700 rounded-full transition-colors relative">
-                                    <div class="dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition-transform"></div>
-                                  </div>
-                                </label>
-
-                                <button onclick="delUser('\${uid}')" class="p-2 text-rose-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/30 rounded-xl transition-all sm:hidden">
-                                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                                </button>
-                            </div>
+                            <label class="flex items-center cursor-pointer relative">
+                              <input type="checkbox" onchange="toggleStatus('\${uid}', this.checked)" \${info.autoActivate ? 'checked' : ''} class="sr-only toggle-checkbox">
+                              <div class="toggle-label w-11 h-6 bg-gray-200 dark:bg-gray-700 rounded-full transition-colors relative">
+                                <div class="dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition-transform"></div>
+                              </div>
+                            </label>
                         </div>
                     \`;
-                    
                     container.appendChild(wrapper);
-                    
-                    // Add Swipe Logic
-                    initSwipe(wrapper, uid);
-
                 } else {
-                    // Fast update existing text safely
                     const timeEl = document.getElementById('time-' + uid);
                     if(timeEl) {
                         timeEl.innerText = info.isRunning ? 'Running...' : info.remaining;
@@ -697,82 +614,13 @@ const uiTemplate = `
                 }
             });
         });
-
-        // Swipe-to-Delete Implementation
-        function initSwipe(wrapper, uid) {
-            const inner = wrapper.querySelector('.swipe-card');
-            let startX = 0, currentX = 0, isDragging = false;
-
-            inner.addEventListener('touchstart', e => {
-                startX = e.touches[0].clientX;
-                isDragging = true;
-                inner.classList.add('swiping');
-            }, { passive: true });
-
-            inner.addEventListener('touchmove', e => {
-                if(!isDragging) return;
-                currentX = e.touches[0].clientX;
-                const diff = currentX - startX;
-                if(diff < 0) { // Only swipe left
-                    inner.style.transform = \`translateX(\${Math.max(diff, -100)}px)\`;
-                }
-            }, { passive: true });
-
-            inner.addEventListener('touchend', e => {
-                isDragging = false;
-                inner.classList.remove('swiping');
-                const diff = currentX - startX;
-                
-                if(diff < -70 && currentX !== 0) { // Threshold met
-                    inner.style.transform = \`translateX(-100vw)\`;
-                    setTimeout(() => delUser(uid), 300);
-                } else {
-                    inner.style.transform = \`translateX(0px)\`;
-                }
-                currentX = 0; // reset
-            });
-        }
-
-        // Add custom style block dynamically to handle toggle dot animation
-        const style = document.createElement('style');
-        style.innerHTML = \`
-            .toggle-checkbox:checked + .toggle-label .dot { transform: translateX(20px); }
-            .toggle-checkbox:checked + .toggle-label { background-color: #6366f1; }
-        \`;
-        document.head.appendChild(style);
-
-        // Stream Watch logic
-        let currentWatch = null;
-        function toggleWatch(uid) {
-            const btn = document.getElementById('watch-' + uid);
-            if (currentWatch === uid) {
-                socket.emit('stop_watch');
-                currentWatch = null;
-                btn.classList.remove('text-indigo-500', 'bg-indigo-50', 'dark:bg-indigo-900/30');
-                btn.classList.add('text-gray-500');
-                document.getElementById('stream-canvas').style.display = 'none';
-                document.getElementById('stream-status').style.display = 'block';
-            } else {
-                if (currentWatch) {
-                    const oldBtn = document.getElementById('watch-' + currentWatch);
-                    if(oldBtn) {
-                        oldBtn.classList.remove('text-indigo-500', 'bg-indigo-50', 'dark:bg-indigo-900/30');
-                        oldBtn.classList.add('text-gray-500');
-                    }
-                }
-                socket.emit('start_watch', { uid });
-                currentWatch = uid;
-                btn.classList.remove('text-gray-500');
-                btn.classList.add('text-indigo-500', 'bg-indigo-50', 'dark:bg-indigo-900/30');
-                switchTab('stream');
-            }
-        }
     </script>
 </body>
 </html>
 `; 
 
-app.get('/', (req, res) => {
+// Changed UI route from / to /activate
+app.get('/activate', (req, res) => {
     res.send(uiTemplate.replace('SYSTEM_ENV_PLACEHOLDER', HOST_ENV));
 });
 
@@ -788,19 +636,6 @@ app.post('/api/target/add', (req, res) => {
         startUIDCycle(uid, name, parseInt(interval) || 40, true);
         appendLog(`New node onboarded: ${name} (${uid})`, 'success');
     }
-    res.json({ success: true });
-});
-
-app.post('/api/target/del', (req, res) => {
-    const { uid } = req.body;
-    let users = loadUIDs();
-    saveUIDs(users.filter(u => u.uid !== uid));
-    if (activeTimers[uid]) {
-        clearTimeout(activeTimers[uid].timer);
-        delete activeTimers[uid];
-        engineStatus[uid] = false;
-    }
-    appendLog(`Node purged from memory: ${uid}`, 'warn');
     res.json({ success: true });
 });
 
@@ -825,8 +660,6 @@ app.post('/api/target/toggle', (req, res) => {
 // ==========================================
 io.on('connection', (socket) => {
     socket.emit('init_logs', systemLogs);
-    socket.on('start_watch', (data) => { global.watchingUID = data.uid; });
-    socket.on('stop_watch', () => { global.watchingUID = null; });
 });
 
 setInterval(() => {
@@ -860,7 +693,8 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`\n================================`);
     console.log(`> ROMEO MATRIX SERVER ONLINE`);
-    console.log(`> PORT: http://localhost:${PORT}`);
+    console.log(`> UI PANEL: http://localhost:${PORT}/activate`);
+    console.log(`> GAME PROXY RUNNING ON: /`);
     console.log(`> HOST: ${HOST_ENV}`);
     console.log(`================================\n`);
 });
